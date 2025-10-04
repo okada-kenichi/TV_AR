@@ -3,27 +3,49 @@
     <head>
         <meta charset="utf-8" />
         <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-        <title>TV Fit (iOS/Android Hybrid)</title>
-        <script type="module" src="https://unpkg.com/@google/model-viewer/dist/model-viewer.min.js"></script>
+        <title>テレビサイズAR風チェッカー</title>
         <style>
             html,
             body {
                 margin: 0;
                 height: 100%;
+                overflow: hidden;
+                background: #000;
+                color: #fff;
+                font-family: system-ui, sans-serif;
+            }
+            #camera {
+                position: fixed;
+                top: 0;
+                left: 0;
+                width: 100%;
+                height: 100%;
+                object-fit: cover;
+                z-index: 0;
+                background: #000;
+            }
+            #overlay {
+                position: fixed;
+                top: 0;
+                left: 0;
+                width: 100%;
+                height: 100%;
+                z-index: 1;
+                pointer-events: none;
             }
             #ui {
                 position: fixed;
-                top: 10px;
+                bottom: 10px;
                 left: 10px;
                 right: 10px;
                 display: flex;
-                gap: 8px;
                 flex-wrap: wrap;
+                gap: 8px;
                 background: rgba(0, 0, 0, 0.55);
-                color: #fff;
                 padding: 8px 10px;
                 border-radius: 10px;
-                font: 14px system-ui;
+                align-items: center;
+                z-index: 2;
             }
             #ui input,
             #ui select,
@@ -33,98 +55,81 @@
                 border-radius: 6px;
                 border: 0;
             }
-            #hint {
-                position: fixed;
-                bottom: 12px;
-                left: 12px;
-                right: 12px;
-                color: #fff;
-                text-align: center;
-                text-shadow: 0 1px 2px #000;
-            }
-            model-viewer {
-                width: 100vw;
-                height: 100vh;
-                background: transparent;
+            .label {
+                font-size: 14px;
             }
         </style>
     </head>
     <body>
+        <video id="camera" autoplay playsinline></video>
+        <svg id="overlay" viewBox="0 0 100 100" preserveAspectRatio="none">
+            <rect id="tv" x="10" y="10" width="80" height="45" rx="1" ry="1" stroke="red" stroke-width="0.8" fill="rgba(255,0,0,0.15)"></rect>
+        </svg>
         <div id="ui">
-            <span>モード:</span>
-            <select id="mode">
-                <option value="floor">床に置く</option>
-                <option value="wall" selected>壁に掛ける</option>
-            </select>
-
-            <span>サイズ:</span>
-            <!-- iOS: ここで選んだインチのUSDZに差し替える / Android: 入力でGLBスケール -->
-            <select id="preset">
+            <span class="label">サイズ:</span>
+            <select id="sizeSel">
                 <option value="43">43"</option>
                 <option value="50">50"</option>
                 <option value="55" selected>55"</option>
                 <option value="65">65"</option>
                 <option value="75">75"</option>
             </select>
-
-            <span>（Androidのみ）幅cm:</span>
-            <input id="widthCm" type="number" min="30" step="1" value="121" style="width: 80px" />
+            <span class="label">距離:</span>
+            <input id="dist" type="number" value="2.5" step="0.1" min="0.5" style="width: 70px" /> m
             <button id="apply">反映</button>
         </div>
 
-        <model-viewer
-            id="mv"
-            src="assets/tv_16x9_1m.glb"
-            ios-src="assets/tv_16x9_55in.usdz"
-            ar
-            ar-modes="webxr scene-viewer quick-look"
-            camera-controls
-            disable-zoom
-            shadow-intensity="0.6"
-            exposure="1.0"
-            style="--poster-color: transparent"
-        >
-            <button slot="ar-button" style="position: absolute; left: 50%; transform: translateX(-50%); bottom: 24px; padding: 10px 16px; border-radius: 10px; border: 0">ARで表示</button>
-        </model-viewer>
-
-        <div id="hint">iOSは「ARで表示」でQuick Lookが開きます。壁/床にかざしてタップで配置。</div>
-
         <script>
-            const mv = document.getElementById("mv");
-            const presetSel = document.getElementById("preset");
-            const widthInput = document.getElementById("widthCm");
-            const modeSel = document.getElementById("mode");
+            const video = document.getElementById("camera");
+            const tv = document.getElementById("tv");
+            const sel = document.getElementById("sizeSel");
+            const distInput = document.getElementById("dist");
 
-            // プリセット → USDZ/GLBの切替
-            const usdzMap = (size) => `assets/tv_16x9_${size}in.usdz`;
-            // GLBは1m幅を想定（16:9板）。Androidではスケールで任意に拡大縮小
-            function setAndroidWidthCM(cm) {
-                const widthM = cm / 100;
-                const base = 1.0; // GLBの基準幅(1m)
-                const s = widthM / base;
-                mv.scale = `${s} ${s} ${s}`;
-            }
-
-            // iOS/Android判定（簡易）
-            const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
-
-            function apply() {
-                const inch = presetSel.value;
-                if (isIOS) {
-                    // iOS: サイズはUSDZで反映（Quick Look）
-                    mv.setAttribute("ios-src", usdzMap(inch));
-                } else {
-                    // Android: GLBをスケール
-                    setAndroidWidthCM(parseFloat(widthInput.value || "121"));
+            async function startCamera() {
+                try {
+                    const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+                    video.srcObject = stream;
+                } catch (e) {
+                    alert("カメラを起動できませんでした。\nHTTPSでアクセスしているか確認してください。");
+                    console.error(e);
                 }
-
-                // 壁/床の違いはユーザー操作でOK（Quick Look/ARが面を自動検出）
-                // 補助として"wall"ならモデルの奥行きを薄く、中心を壁面に寄せたい場合はGLB側のピボットで調整
             }
 
-            document.getElementById("apply").addEventListener("click", apply);
-            presetSel.addEventListener("change", apply);
-            window.addEventListener("load", apply);
+            // 16:9ディスプレイの実幅（m）をインチから計算
+            function inchToWidthM(inch) {
+                const widthIn = (inch * 16) / Math.sqrt(16 * 16 + 9 * 9);
+                return widthIn * 0.0254;
+            }
+
+            // 現在の画面サイズと距離から、矩形を画面上に何%で描くか計算
+            function updateRect() {
+                const inch = parseFloat(sel.value);
+                const dist = parseFloat(distInput.value);
+                const w = inchToWidthM(inch);
+
+                // 視野角から見たときの画面上の幅の割合を概算
+                // スマホカメラの水平視野角を約60°として近似
+                const fov = (60 * Math.PI) / 180;
+                const visibleWidthAtDist = 2 * Math.tan(fov / 2) * dist; // その距離で映る実世界の幅[m]
+                let ratio = w / visibleWidthAtDist; // 画面幅に対する比率
+                if (ratio > 1) ratio = 1; // 画面外にはみ出す場合は制限
+
+                // SVGビュー(100x100)内で中心に配置
+                const rectW = 100 * ratio;
+                const rectH = (rectW * 9) / 16;
+                const x = (100 - rectW) / 2;
+                const y = (100 - rectH) / 2;
+
+                tv.setAttribute("x", x);
+                tv.setAttribute("y", y);
+                tv.setAttribute("width", rectW);
+                tv.setAttribute("height", rectH);
+            }
+
+            document.getElementById("apply").addEventListener("click", updateRect);
+
+            startCamera();
+            updateRect();
         </script>
     </body>
 </html>
