@@ -3,29 +3,30 @@
     <head>
         <meta charset="utf-8" />
         <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-        <title>TVサイズAR（iOS/Android）</title>
-        <!-- iOS: Quick Look / Android: WebXR 用に model-viewer を利用 -->
-        <script type="module" src="https://unpkg.com/@google/model-viewer/dist/model-viewer.min.js"></script>
+        <title>TV Fit WebXR</title>
         <style>
             html,
             body {
                 margin: 0;
                 height: 100%;
+                overflow: hidden;
             }
             #ui {
                 position: fixed;
-                top: 10px;
-                left: 10px;
-                right: 10px;
-                display: flex;
-                gap: 8px;
-                flex-wrap: wrap;
+                top: 12px;
+                left: 12px;
+                right: 12px;
                 background: rgba(0, 0, 0, 0.55);
                 color: #fff;
-                padding: 8px 10px;
+                padding: 10px 12px;
                 border-radius: 10px;
-                font: 14px system-ui;
+                font: 14px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial;
+                display: flex;
+                gap: 10px;
+                flex-wrap: wrap;
+                align-items: center;
             }
+            #ui input,
             #ui select,
             #ui button {
                 font-size: 14px;
@@ -33,68 +34,252 @@
                 border-radius: 6px;
                 border: 0;
             }
-            model-viewer {
-                width: 100vw;
-                height: 100vh;
-                background: transparent;
+            #hint {
+                position: fixed;
+                bottom: 14px;
+                left: 12px;
+                right: 12px;
+                color: #fff;
+                text-align: center;
+                text-shadow: 0 1px 2px #000;
+                font-size: 14px;
+            }
+            .badge {
+                padding: 2px 6px;
+                background: #222;
+                border-radius: 6px;
+                font-size: 12px;
+                opacity: 0.8;
             }
         </style>
     </head>
     <body>
         <div id="ui">
-            <span>サイズ:</span>
-            <select id="size">
-                <option value="43">43"</option>
-                <option value="50">50"</option>
-                <option value="55" selected>55"</option>
-                <option value="65">65"</option>
-                <option value="75">75"</option>
+            <span class="badge">モード</span>
+            <select id="mode">
+                <option value="floor">床に置く</option>
+                <option value="wall" selected>壁に掛ける</option>
             </select>
-            <button id="openAR">ARで表示</button>
+
+            <span class="badge">サイズ</span>
+            <select id="sizeMode">
+                <option value="diag">対角（インチ）</option>
+                <option value="width">幅（cm）</option>
+            </select>
+            <input id="sizeValue" type="number" value="55" min="10" step="1" style="width: 90px" />
+
+            <button id="apply">反映</button>
+            <button id="reset">リセット</button>
         </div>
+        <div id="hint">AR開始後、ゆっくり床や壁をかざして平面を見つけ、タップで設置。</div>
 
-        <!-- 表示用ビューワ（iOSはQuick Lookに、AndroidはWebXRに分岐） -->
-        <model-viewer
-            id="mv"
-            src="assets/tv_16x9_1m.glb"
-            ios-src="assets/tv_16x9_55in.usdz"
-            ar
-            ar-modes="webxr scene-viewer quick-look"
-            camera-controls
-            disable-zoom
-            style="--poster-color: transparent"
-        >
-            <button slot="ar-button" id="arBtn" style="display: none">AR</button>
-        </model-viewer>
+        <script type="module">
+            import * as THREE from "https://unpkg.com/three@0.160.0/build/three.module.js";
+            import { ARButton } from "https://unpkg.com/three@0.160.0/examples/jsm/webxr/ARButton.js";
 
-        <script>
-            const mv = document.getElementById("mv");
-            const sel = document.getElementById("size");
-            const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
+            const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+            renderer.setSize(innerWidth, innerHeight);
+            renderer.setPixelRatio(devicePixelRatio);
+            renderer.xr.enabled = true;
+            document.body.appendChild(renderer.domElement);
 
-            // サイズ変更 → iOSはUSDZ差し替え、AndroidはGLBスケーリング（GLBは幅1m基準）
-            function applySize() {
-                const inch = sel.value;
-                if (isIOS) {
-                    mv.setAttribute("ios-src", `assets/tv_16x9_${inch}in.usdz`);
+            const scene = new THREE.Scene();
+            const camera = new THREE.PerspectiveCamera();
+
+            // 環境光
+            scene.add(new THREE.HemisphereLight(0xffffff, 0x444444, 1.0));
+            const dir = new THREE.DirectionalLight(0xffffff, 0.8);
+            dir.position.set(1, 2, 1);
+            scene.add(dir);
+
+            // レティクル（ヒット位置ガイド）
+            const reticleGeo = new THREE.RingGeometry(0.12, 0.15, 32).rotateX(-Math.PI / 2);
+            const reticleMat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.9 });
+            const reticle = new THREE.Mesh(reticleGeo, reticleMat);
+            reticle.matrixAutoUpdate = false;
+            reticle.visible = false;
+            scene.add(reticle);
+
+            // TVプレースホルダー（16:9パネル＋薄い厚み＋黒枠）
+            let tvGroup = new THREE.Group();
+            scene.add(tvGroup);
+
+            let tvMesh, bezelMesh, backMesh;
+            function buildTV(widthMeters = 1.21) {
+                // 55インチ相当の初期幅
+                // 16:9
+                const h = (widthMeters * 9) / 16;
+                const t = 0.05; // 厚み5cm相当
+                tvGroup.clear();
+
+                const panelGeo = new THREE.PlaneGeometry(widthMeters, h);
+                const panelMat = new THREE.MeshPhongMaterial({ color: 0x111111, shininess: 40, specular: 0x333333 });
+                tvMesh = new THREE.Mesh(panelGeo, panelMat);
+                tvMesh.position.set(0, 0, 0);
+                tvMesh.castShadow = true;
+                tvGroup.add(tvMesh);
+
+                // ベゼル（ちょい大きい枠をワイヤで）
+                const bezelGeo = new THREE.EdgesGeometry(new THREE.PlaneGeometry(widthMeters, h));
+                const bezelMat = new THREE.LineBasicMaterial({ color: 0xffffff });
+                bezelMesh = new THREE.LineSegments(bezelGeo, bezelMat);
+                tvGroup.add(bezelMesh);
+
+                // 背面（薄い箱）
+                const backGeo = new THREE.BoxGeometry(widthMeters, h, t);
+                const backMat = new THREE.MeshPhongMaterial({ color: 0x000000 });
+                backMesh = new THREE.Mesh(backGeo, backMat);
+                backMesh.position.set(0, 0, -t / 2 - 0.001);
+                tvGroup.add(backMesh);
+            }
+            buildTV();
+
+            // UI
+            const modeSel = document.getElementById("mode");
+            const sizeModeSel = document.getElementById("sizeMode");
+            const sizeInput = document.getElementById("sizeValue");
+            document.getElementById("apply").onclick = () => {
+                const v = parseFloat(sizeInput.value);
+                let widthM = 1.21;
+                if (sizeModeSel.value === "diag") {
+                    // 16:9の幅係数（インチ → m）: width = d * 16 / sqrt(16^2+9^2)
+                    const widthIn = v * (16 / Math.sqrt(337));
+                    widthM = widthIn * 0.0254;
                 } else {
-                    const widthM = inchToWidthMeters(+inch); // 16:9の幅に換算
-                    const s = widthM / 1.0; // GLBが幅1m基準
-                    mv.scale = `${s} ${s} ${s}`;
+                    widthM = v / 100.0;
                 }
-            }
-            function inchToWidthMeters(inch) {
-                const widthIn = (inch * 16) / Math.sqrt(16 * 16 + 9 * 9); // 16:9の幅
-                return widthIn * 0.0254;
-            }
-            sel.addEventListener("change", applySize);
-            window.addEventListener("load", applySize);
+                buildTV(widthM);
+            };
+            document.getElementById("reset").onclick = () => {
+                placed = false;
+                tvGroup.visible = false;
+            };
 
-            // ユーザー操作でARを開く（iOSはQuick Lookが立ち上がりカメラ起動）
-            document.getElementById("openAR").addEventListener("click", () => {
-                // model-viewer の内部ARボタンを模擬クリック
-                mv.activateAR();
+            // ARボタン（平面検出/ヒットテスト/DOMオーバーレイ）
+            const arButton = ARButton.createButton(renderer, {
+                requiredFeatures: ["hit-test"],
+                optionalFeatures: ["dom-overlay", "plane-detection"],
+                domOverlay: { root: document.body },
             });
+            document.body.appendChild(arButton);
+
+            // セッションとヒットテスト
+            let xrHitTestSource = null;
+            let xrViewerSpace = null;
+            let xrRefSpace = null;
+            let placed = false;
+            let planeOrientationWanted = () => (modeSel.value === "wall" ? "vertical" : "horizontal");
+
+            renderer.xr.addEventListener("sessionstart", async () => {
+                const session = renderer.xr.getSession();
+                xrRefSpace = await session.requestReferenceSpace("local");
+                xrViewerSpace = await session.requestReferenceSpace("viewer");
+
+                // 通常のヒットテスト（平面 or ポイント）
+                xrHitTestSource = (await session.requestHitTestSourceForTransientInput)
+                    ? await session.requestHitTestSourceForTransientInput({ profile: "generic-touchscreen", entityTypes: ["plane", "point", "mesh"] })
+                    : await session.requestHitTestSource({ space: xrViewerSpace });
+
+                // タップで確定配置
+                session.addEventListener("select", () => {
+                    if (reticle.visible) {
+                        placed = true;
+                        tvGroup.visible = true;
+                        tvGroup.matrix.copy(reticle.matrix);
+                    }
+                });
+
+                // ドラッグで微調整（簡易）
+                let dragging = false,
+                    lastX = 0;
+                renderer.domElement.addEventListener("pointerdown", (e) => {
+                    dragging = true;
+                    lastX = e.clientX;
+                });
+                renderer.domElement.addEventListener("pointerup", () => (dragging = false));
+                renderer.domElement.addEventListener("pointermove", (e) => {
+                    if (!dragging || !placed) return;
+                    const dx = e.clientX - lastX;
+                    lastX = e.clientX;
+                    tvGroup.rotation.y -= dx * 0.005; // 回転
+                });
+            });
+
+            function isOrientationOk(normal, want) {
+                // 平面法線から水平/垂直をざっくり判定（Y軸:上）
+                const up = new THREE.Vector3(0, 1, 0);
+                const n = new THREE.Vector3(normal.x, normal.y, normal.z).normalize();
+                const dot = Math.abs(n.dot(up)); // 1:垂直面法線が上向き（床）/ 0:水平面法線が横向き（壁）
+                if (want === "horizontal") return dot > 0.75; // 床・天井
+                if (want === "vertical") return dot < 0.25; // 壁
+                return true;
+            }
+
+            renderer.setAnimationLoop((t, frame) => {
+                if (!frame) return;
+                const session = renderer.xr.getSession();
+                if (!session || !xrRefSpace) return;
+
+                // ヒットテスト
+                let hitPose = null;
+                let planeNormal = { x: 0, y: 1, z: 0 };
+
+                // Transient input ソース（あれば）
+                if (frame.getHitTestResultsForTransient && xrHitTestSource) {
+                    const hitsByInput = frame.getHitTestResultsForTransient(xrHitTestSource);
+                    if (hitsByInput.length && hitsByInput[0].results.length) {
+                        const hit = hitsByInput[0].results[0];
+                        const refSpace = renderer.xr.getReferenceSpace();
+                        const pose = hit.getPose(refSpace);
+                        hitPose = pose && pose.transform.matrix;
+
+                        // 平面情報（取得できる環境のみ）
+                        if (hit.createAnchor) {
+                            // plane normal は環境依存。未取得時は推定（ビューポーズから）
+                        }
+                    }
+                } else if (frame.getHitTestResults && xrHitTestSource) {
+                    const hits = frame.getHitTestResults(xrHitTestSource);
+                    if (hits.length) {
+                        const pose = hits[0].getPose(xrRefSpace);
+                        hitPose = pose && pose.transform.matrix;
+                        // 法線は取れない実装も多いので、ここでは姿勢から推定はしない（簡易）
+                    }
+                }
+
+                // reticle更新
+                if (hitPose) {
+                    reticle.visible = true;
+                    reticle.matrix.fromArray(hitPose);
+
+                    // 壁モードのときはレティクルを常にカメラに正対させて“掛ける”感じに
+                    if (planeOrientationWanted() === "vertical") {
+                        const m = new THREE.Matrix4().fromArray(hitPose);
+                        const pos = new THREE.Vector3().setFromMatrixPosition(m);
+                        reticle.position.copy(pos);
+                        // カメラ方向を向ける
+                        reticle.lookAt(camera.position);
+                        reticle.rotateX(-Math.PI / 2);
+                    }
+                    if (!placed) tvGroup.visible = false;
+                } else {
+                    reticle.visible = false;
+                }
+
+                renderer.render(scene, camera);
+            });
+
+            // ウィンドウリサイズ
+            addEventListener("resize", () => {
+                renderer.setSize(innerWidth, innerHeight);
+                camera.aspect = innerWidth / innerHeight;
+                camera.updateProjectionMatrix();
+            });
+
+            // iOS簡易フォールバック注意
+            if (!("xr" in navigator)) {
+                document.getElementById("hint").textContent = "この端末はWebXRに未対応の可能性があります。AndroidのChrome推奨。";
+            }
         </script>
     </body>
 </html>
